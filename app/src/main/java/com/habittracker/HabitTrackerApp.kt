@@ -2,9 +2,11 @@ package com.habittracker
 
 import android.app.Application
 import android.content.Context
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -241,6 +243,26 @@ class HabitTrackerViewModel(application: Application) : AndroidViewModel(applica
         }
     }
 
+    /**
+     * Toggle habit for a past date (within the last 3 days).
+     * Called from the long-press confirmation dialog.
+     */
+    fun togglePastHabit(habitId: Int, date: LocalDate) {
+        val today = activeTrackingDate(LocalDateTime.now())
+        val threeDaysAgo = today.minusDays(3)
+        // Only allow editing for dates within the past 3 days (exclusive of today which uses normal toggle)
+        if (date.isBefore(threeDaysAgo) || date.isAfter(today)) return
+
+        viewModelScope.launch {
+            val existing = dao.findCompletion(habitId, date.toString())
+            if (existing == null) {
+                dao.upsertCompletion(HabitCompletionEntity(habitId = habitId, date = date.toString()))
+            } else {
+                dao.deleteCompletion(habitId, date.toString())
+            }
+        }
+    }
+
     fun showPreviousMonth() {
         selectedMonth.value = selectedMonth.value.minusMonths(1)
     }
@@ -269,6 +291,7 @@ fun HabitTrackerApp() {
                 onAddHabit = trackerViewModel::addHabit,
                 onDeleteHabit = trackerViewModel::deleteHabit,
                 onToggleHabit = trackerViewModel::toggleHabit,
+                onTogglePastHabit = trackerViewModel::togglePastHabit,
                 onPreviousMonth = trackerViewModel::showPreviousMonth,
                 onNextMonth = trackerViewModel::showNextMonth
             )
@@ -282,6 +305,7 @@ private fun HabitTrackerScreen(
     onAddHabit: (String) -> Unit,
     onDeleteHabit: (Int) -> Unit,
     onToggleHabit: (Int, LocalDate) -> Unit,
+    onTogglePastHabit: (Int, LocalDate) -> Unit,
     onPreviousMonth: () -> Unit,
     onNextMonth: () -> Unit
 ) {
@@ -328,7 +352,8 @@ private fun HabitTrackerScreen(
                 habitRows = state.habitRows,
                 activeTrackingDate = activeTrackingDate,
                 onDeleteHabit = onDeleteHabit,
-                onToggleHabit = onToggleHabit
+                onToggleHabit = onToggleHabit,
+                onTogglePastHabit = onTogglePastHabit
             )
 
             ProgressGraphCard(
@@ -371,7 +396,7 @@ private fun HeaderCard(
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f)
             )
             Text(
-                text = "Open day: ${activeTrackingDate.format(DateTimeFormatter.ofPattern("dd MMM"))}. After 1:00 AM, unfinished boxes from the previous open day turn red and lock.",
+                text = "Open day: ${activeTrackingDate.format(DateTimeFormatter.ofPattern("dd MMM"))}. After 1 AM, unfinished boxes turn red. Long-press (3s) any box from the past 3 days to change it.",
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
                 fontSize = 13.sp
             )
@@ -479,8 +504,44 @@ private fun MonthTrackerCard(
     habitRows: List<HabitRowUi>,
     activeTrackingDate: LocalDate,
     onDeleteHabit: (Int) -> Unit,
-    onToggleHabit: (Int, LocalDate) -> Unit
+    onToggleHabit: (Int, LocalDate) -> Unit,
+    onTogglePastHabit: (Int, LocalDate) -> Unit
 ) {
+    // Calculate the editable date range: past 3 days from the active tracking date
+    val editableStartDate = remember(activeTrackingDate) { activeTrackingDate.minusDays(3) }
+
+    // State for long-press confirmation dialog
+    var longPressTarget by remember { mutableStateOf<Triple<Int, LocalDate, Boolean>?>(null) }
+
+    // Long-press confirmation dialog
+    longPressTarget?.let { (habitId, date, currentlyDone) ->
+        val dateStr = date.format(DateTimeFormatter.ofPattern("dd MMM yyyy"))
+        val actionText = if (currentlyDone) "mark as NOT completed" else "mark as completed"
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { longPressTarget = null },
+            title = { Text("Change Past Completion") },
+            text = {
+                Text("Do you want to $actionText for $dateStr?")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    onTogglePastHabit(habitId, date)
+                    longPressTarget = null
+                }) {
+                    Text(
+                        if (currentlyDone) "Mark Uncompleted" else "Mark Completed",
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { longPressTarget = null }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
     Card(
         shape = RoundedCornerShape(24.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
@@ -565,12 +626,24 @@ private fun MonthTrackerCard(
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     days.forEach { day ->
+                                        val isLocked = day.isBefore(activeTrackingDate)
+                                        val isEditable = isLocked &&
+                                            !day.isBefore(editableStartDate) &&
+                                            day.isBefore(activeTrackingDate)
                                         TrackerDayCell(
                                             cellSize = cellSize,
                                             isDone = habit.completedDates.contains(day),
-                                            isLocked = day.isBefore(activeTrackingDate),
+                                            isLocked = isLocked,
                                             isFuture = day.isAfter(activeTrackingDate),
-                                            onClick = { onToggleHabit(habit.id, day) }
+                                            isEditable = isEditable,
+                                            onClick = { onToggleHabit(habit.id, day) },
+                                            onLongPress = {
+                                                longPressTarget = Triple(
+                                                    habit.id,
+                                                    day,
+                                                    habit.completedDates.contains(day)
+                                                )
+                                            }
                                         )
                                     }
                                 }
@@ -652,16 +725,24 @@ private fun DayHeaderCell(day: LocalDate, cellSize: Dp) {
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun TrackerDayCell(
     cellSize: Dp,
     isDone: Boolean,
     isLocked: Boolean,
     isFuture: Boolean,
-    onClick: () -> Unit
+    isEditable: Boolean = false,
+    onClick: () -> Unit,
+    onLongPress: () -> Unit = {}
 ) {
+    // Editable past days get a distinct visual style
+    val EditableColor = Color(0xFF3B82F6) // blue accent for editable past days
+
     val background = when {
+        isDone && isEditable -> MaterialTheme.colorScheme.primary
         isDone -> MaterialTheme.colorScheme.primary
+        isEditable && isLocked -> EditableColor.copy(alpha = 0.12f)
         isLocked -> MissedColor.copy(alpha = 0.18f)
         isFuture -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
         else -> Color.Transparent
@@ -669,8 +750,17 @@ private fun TrackerDayCell(
 
     val contentColor = when {
         isDone -> MaterialTheme.colorScheme.onPrimary
+        isEditable && isLocked -> EditableColor
         isLocked -> MissedColor
         else -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+    }
+
+    val borderColor = when {
+        isDone && isEditable -> EditableColor
+        isDone -> MaterialTheme.colorScheme.primary
+        isEditable -> EditableColor.copy(alpha = 0.5f)
+        isLocked -> MissedColor
+        else -> MaterialTheme.colorScheme.outline.copy(alpha = 0.6f)
     }
 
     Box(
@@ -680,20 +770,26 @@ private fun TrackerDayCell(
             .clip(RoundedCornerShape(12.dp))
             .background(background)
             .border(
-                width = 1.dp,
-                color = when {
-                    isDone -> MaterialTheme.colorScheme.primary
-                    isLocked -> MissedColor
-                    else -> MaterialTheme.colorScheme.outline.copy(alpha = 0.6f)
-                },
+                width = if (isEditable) 1.5.dp else 1.dp,
+                color = borderColor,
                 shape = RoundedCornerShape(12.dp)
             )
-            .clickable(enabled = !isFuture && !isLocked, onClick = onClick),
+            .combinedClickable(
+                enabled = !isFuture && (!isLocked || isEditable),
+                onClick = {
+                    if (!isLocked) onClick()
+                    // Normal click on editable locked cells does nothing — must long-press
+                },
+                onLongClick = {
+                    if (isEditable) onLongPress()
+                }
+            ),
         contentAlignment = Alignment.Center
     ) {
         Text(
             text = when {
                 isDone -> "✓"
+                isEditable && isLocked -> "·" // middle dot to hint it's editable
                 isLocked -> "✕"
                 else -> ""
             },
