@@ -48,7 +48,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.Canvas
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -809,7 +817,7 @@ private fun ProgressGraphCard(
                 fontWeight = FontWeight.SemiBold
             )
             Text(
-                text = "Shows your last 5 days of progress. Each bar displays your completed habit count.",
+                text = "Tracks your daily progress as a continuous slope. Each point shows your completed habit count.",
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f)
             )
             MetricBadge(
@@ -833,7 +841,7 @@ private fun DailyProgressGraph(
     activeTrackingDate: LocalDate,
     habitCount: Int
 ) {
-    val chartHeight = 220.dp
+    val chartHeight = 240.dp
     val plottedDays = remember(days, activeTrackingDate) { days.filter { !it.isAfter(activeTrackingDate) } }
 
     if (plottedDays.isEmpty()) {
@@ -846,13 +854,29 @@ private fun DailyProgressGraph(
 
     val graphScrollState = rememberScrollState()
     val density = LocalDensity.current
-    val barWidthWithSpacing = with(density) { (48.dp + 12.dp).toPx() }
+    val pointSpacing = 60.dp
+    val pointSpacingPx = with(density) { pointSpacing.toPx() }
+    val paddingLeft = with(density) { 16.dp.toPx() }
+    val paddingRight = with(density) { 16.dp.toPx() }
+    val paddingTop = with(density) { 32.dp.toPx() }
+    val paddingBottom = with(density) { 48.dp.toPx() }
+
+    val totalGraphWidth = paddingLeft + paddingRight + (plottedDays.size - 1).coerceAtLeast(0) * pointSpacingPx
+    val totalGraphWidthDp = with(density) { totalGraphWidth.toDp() }.coerceAtLeast(200.dp)
+
+    val maxValue = habitCount.coerceAtLeast(1)
+
+    val primaryColor = MaterialTheme.colorScheme.primary
+    val secondaryColor = MaterialTheme.colorScheme.secondary
+    val surfaceTextColor = MaterialTheme.colorScheme.onSurface
+    val todayColor = MaterialTheme.colorScheme.primary
+    val gridLineColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f)
 
     // Auto-scroll to active tracking date
     LaunchedEffect(activeTrackingDate, plottedDays) {
         val dayIndex = plottedDays.indexOfFirst { it == activeTrackingDate }
         if (dayIndex > 0) {
-            val targetScroll = (dayIndex * barWidthWithSpacing - barWidthWithSpacing * 2).toInt().coerceAtLeast(0)
+            val targetScroll = (dayIndex * pointSpacingPx - pointSpacingPx * 3).toInt().coerceAtLeast(0)
             graphScrollState.scrollTo(targetScroll)
         }
     }
@@ -861,94 +885,226 @@ private fun DailyProgressGraph(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.Bottom
     ) {
+        // Y-axis labels
         Column(
             modifier = Modifier.height(chartHeight),
             verticalArrangement = Arrangement.SpaceBetween,
             horizontalAlignment = Alignment.End
         ) {
-            val maxLabel = habitCount.coerceAtLeast(1)
-            val midLabel = maxLabel / 2
-            Text("$maxLabel", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
-            Text("$midLabel", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
-            Text("0", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+            val midLabel = maxValue / 2
+            Text("$maxValue", color = surfaceTextColor.copy(alpha = 0.6f), fontSize = 12.sp)
+            Text("$midLabel", color = surfaceTextColor.copy(alpha = 0.6f), fontSize = 12.sp)
+            Text("0", color = surfaceTextColor.copy(alpha = 0.6f), fontSize = 12.sp)
         }
 
-        Spacer(modifier = Modifier.width(10.dp))
+        Spacer(modifier = Modifier.width(8.dp))
 
-        Row(
+        // Scrollable chart area
+        Box(
             modifier = Modifier
                 .weight(1f)
-                .horizontalScroll(graphScrollState),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-            verticalAlignment = Alignment.Bottom
+                .horizontalScroll(graphScrollState)
         ) {
-            plottedDays.forEach { day ->
-                val value = dailyTotals[day] ?: 0
-                DayProgressBar(
-                    day = day,
-                    value = value,
-                    chartHeight = chartHeight,
-                    habitCount = habitCount
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun DayProgressBar(day: LocalDate, value: Int, chartHeight: Dp, habitCount: Int) {
-    val maxValue = habitCount.coerceAtLeast(1)
-    val barHeight = remember(value, maxValue) {
-        val minBarHeight = 32f // minimum height so the count label is always visible
-        ((value.coerceIn(0, maxValue) / maxValue.toFloat()) * 160f).dp.coerceAtLeast(minBarHeight.dp)
-    }
-
-    val isToday = day == activeTrackingDate(LocalDateTime.now())
-
-    Column(
-        modifier = Modifier.widthIn(min = 48.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Bottom
-    ) {
-        Box(
-            modifier = Modifier.height(chartHeight - 40.dp),
-            contentAlignment = Alignment.BottomCenter
-        ) {
-            Box(
+            Canvas(
                 modifier = Modifier
-                    .width(40.dp)
-                    .height(barHeight)
-                    .clip(RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp))
-                    .background(
-                        if (isToday) MaterialTheme.colorScheme.primary
-                        else if (value > 0) MaterialTheme.colorScheme.secondary
-                        else MaterialTheme.colorScheme.surfaceVariant
-                    ),
-                contentAlignment = Alignment.Center
+                    .width(totalGraphWidthDp)
+                    .height(chartHeight)
             ) {
-                Text(
-                    text = "$value",
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 16.sp,
-                    color = if (isToday) MaterialTheme.colorScheme.onPrimary
-                            else if (value > 0) MaterialTheme.colorScheme.onSurface
-                            else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                val canvasWidth = size.width
+                val canvasHeight = size.height
+                val drawAreaHeight = canvasHeight - paddingTop - paddingBottom
+                val drawAreaBottom = canvasHeight - paddingBottom
+
+                // Draw horizontal grid lines
+                for (i in 0..4) {
+                    val y = drawAreaBottom - (drawAreaHeight * i / 4f)
+                    drawLine(
+                        color = gridLineColor,
+                        start = Offset(paddingLeft, y),
+                        end = Offset(canvasWidth - paddingRight, y),
+                        strokeWidth = 1f
+                    )
+                }
+
+                if (plottedDays.size == 1) {
+                    // Single data point — draw a dot and label
+                    val value = dailyTotals[plottedDays[0]] ?: 0
+                    val x = paddingLeft
+                    val fraction = value.toFloat() / maxValue
+                    val y = drawAreaBottom - (fraction * drawAreaHeight)
+                    val isToday = plottedDays[0] == activeTrackingDate
+
+                    drawCircle(
+                        color = if (isToday) todayColor else secondaryColor,
+                        radius = 10f,
+                        center = Offset(x, y)
+                    )
+
+                    // Draw count label
+                    drawContext.canvas.nativeCanvas.apply {
+                        val paint = android.graphics.Paint().apply {
+                            textAlign = android.graphics.Paint.Align.CENTER
+                            textSize = 32f
+                            isFakeBoldText = true
+                            color = if (isToday) todayColor.hashCode()
+                                    else android.graphics.Color.parseColor("#1E1B18")
+                        }
+                        drawText("$value", x, y - 20f, paint)
+                    }
+
+                    // Draw day label
+                    drawContext.canvas.nativeCanvas.apply {
+                        val paint = android.graphics.Paint().apply {
+                            textAlign = android.graphics.Paint.Align.CENTER
+                            textSize = 28f
+                            isFakeBoldText = isToday
+                            color = if (isToday) todayColor.hashCode()
+                                    else android.graphics.Color.parseColor("#6B6560")
+                        }
+                        drawText(plottedDays[0].dayOfMonth.toString(), x, drawAreaBottom + 36f, paint)
+                    }
+                    return@Canvas
+                }
+
+                // Calculate data points
+                val points = plottedDays.mapIndexed { index, day ->
+                    val value = dailyTotals[day] ?: 0
+                    val x = paddingLeft + index * pointSpacingPx
+                    val fraction = value.toFloat() / maxValue
+                    val y = drawAreaBottom - (fraction * drawAreaHeight)
+                    Triple(x, y, value)
+                }
+
+                // Build smooth curve path using Catmull-Rom to cubic Bezier conversion
+                val curvePath = Path()
+                curvePath.moveTo(points[0].first, points[0].second)
+
+                for (i in 0 until points.size - 1) {
+                    val p0 = if (i > 0) points[i - 1] else points[i]
+                    val p1 = points[i]
+                    val p2 = points[i + 1]
+                    val p3 = if (i + 2 < points.size) points[i + 2] else points[i + 1]
+
+                    val tension = 0.3f
+                    val cp1x = p1.first + (p2.first - p0.first) * tension
+                    val cp1y = p1.second + (p2.second - p0.second) * tension
+                    val cp2x = p2.first - (p3.first - p1.first) * tension
+                    val cp2y = p2.second - (p3.second - p1.second) * tension
+
+                    curvePath.cubicTo(cp1x, cp1y, cp2x, cp2y, p2.first, p2.second)
+                }
+
+                // Draw filled area under the curve
+                val fillPath = Path()
+                fillPath.addPath(curvePath)
+                fillPath.lineTo(points.last().first, drawAreaBottom)
+                fillPath.lineTo(points.first().first, drawAreaBottom)
+                fillPath.close()
+
+                drawPath(
+                    path = fillPath,
+                    brush = Brush.verticalGradient(
+                        colors = listOf(
+                            primaryColor.copy(alpha = 0.35f),
+                            primaryColor.copy(alpha = 0.05f)
+                        ),
+                        startY = paddingTop,
+                        endY = drawAreaBottom
+                    )
                 )
+
+                // Draw the curve line
+                drawPath(
+                    path = curvePath,
+                    color = primaryColor,
+                    style = Stroke(
+                        width = 6f,
+                        cap = StrokeCap.Round,
+                        join = StrokeJoin.Round
+                    )
+                )
+
+                // Draw data points, count labels, and day labels
+                points.forEachIndexed { index, (x, y, value) ->
+                    val day = plottedDays[index]
+                    val isToday = day == activeTrackingDate
+
+                    // Outer glow circle for today
+                    if (isToday) {
+                        drawCircle(
+                            color = todayColor.copy(alpha = 0.2f),
+                            radius = 18f,
+                            center = Offset(x, y)
+                        )
+                    }
+
+                    // Data point dot
+                    drawCircle(
+                        color = Color.White,
+                        radius = 10f,
+                        center = Offset(x, y)
+                    )
+                    drawCircle(
+                        color = if (isToday) todayColor else secondaryColor,
+                        radius = 7f,
+                        center = Offset(x, y)
+                    )
+
+                    // Completion count label above the dot
+                    drawContext.canvas.nativeCanvas.apply {
+                        val paint = android.graphics.Paint().apply {
+                            textAlign = android.graphics.Paint.Align.CENTER
+                            textSize = 32f
+                            isFakeBoldText = true
+                            color = if (isToday) android.graphics.Color.parseColor("#2B6E4F")
+                                    else android.graphics.Color.parseColor("#1E1B18")
+                            isAntiAlias = true
+                        }
+                        // Draw a small rounded rect background behind the count
+                        val textBounds = android.graphics.Rect()
+                        paint.getTextBounds("$value", 0, "$value".length, textBounds)
+                        val bgPaint = android.graphics.Paint().apply {
+                            color = android.graphics.Color.parseColor("#FFFBF4")
+                            isAntiAlias = true
+                        }
+                        val labelY = y - 24f
+                        val bgLeft = x - textBounds.width() / 2f - 8f
+                        val bgTop = labelY - textBounds.height() - 4f
+                        val bgRight = x + textBounds.width() / 2f + 8f
+                        val bgBottom = labelY + 6f
+                        drawRoundRect(
+                            bgLeft, bgTop, bgRight, bgBottom,
+                            12f, 12f, bgPaint
+                        )
+                        drawText("$value", x, labelY, paint)
+                    }
+
+                    // Day number below the chart
+                    drawContext.canvas.nativeCanvas.apply {
+                        val paint = android.graphics.Paint().apply {
+                            textAlign = android.graphics.Paint.Align.CENTER
+                            textSize = 28f
+                            isFakeBoldText = isToday
+                            color = if (isToday) android.graphics.Color.parseColor("#2B6E4F")
+                                    else android.graphics.Color.parseColor("#6B6560")
+                            isAntiAlias = true
+                        }
+                        drawText(day.dayOfMonth.toString(), x, drawAreaBottom + 30f, paint)
+                    }
+
+                    // Day-of-week abbreviation below day number
+                    drawContext.canvas.nativeCanvas.apply {
+                        val paint = android.graphics.Paint().apply {
+                            textAlign = android.graphics.Paint.Align.CENTER
+                            textSize = 22f
+                            color = android.graphics.Color.parseColor("#9E9890")
+                            isAntiAlias = true
+                        }
+                        drawText(day.dayOfWeek.name.take(3), x, drawAreaBottom + 48f, paint)
+                    }
+                }
             }
         }
-        Spacer(modifier = Modifier.height(4.dp))
-        Text(
-            text = day.dayOfMonth.toString(),
-            fontSize = 12.sp,
-            fontWeight = if (isToday) FontWeight.Bold else FontWeight.Normal,
-            color = if (isToday) MaterialTheme.colorScheme.primary
-                    else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
-        )
-        Text(
-            text = day.dayOfWeek.name.take(3),
-            fontSize = 10.sp,
-            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
-        )
     }
 }
 
