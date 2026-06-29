@@ -146,6 +146,9 @@ interface HabitTrackerDao {
 
     @Query("DELETE FROM habit_completions WHERE habitId = :habitId AND date = :date")
     suspend fun deleteCompletion(habitId: Int, date: String)
+
+    @Query("UPDATE habits SET name = :newName WHERE id = :habitId")
+    suspend fun updateHabitName(habitId: Int, newName: String)
 }
 
 @Database(
@@ -238,6 +241,14 @@ class HabitTrackerViewModel(application: Application) : AndroidViewModel(applica
         }
     }
 
+    fun renameHabit(habitId: Int, newName: String) {
+        val trimmed = newName.trim()
+        if (trimmed.isBlank()) return
+        viewModelScope.launch {
+            dao.updateHabitName(habitId, trimmed)
+        }
+    }
+
     fun toggleHabit(habitId: Int, date: LocalDate) {
         if (date != activeTrackingDate(LocalDateTime.now())) return
 
@@ -298,6 +309,7 @@ fun HabitTrackerApp() {
                 state = state,
                 onAddHabit = trackerViewModel::addHabit,
                 onDeleteHabit = trackerViewModel::deleteHabit,
+                onRenameHabit = trackerViewModel::renameHabit,
                 onToggleHabit = trackerViewModel::toggleHabit,
                 onTogglePastHabit = trackerViewModel::togglePastHabit,
                 onPreviousMonth = trackerViewModel::showPreviousMonth,
@@ -312,6 +324,7 @@ private fun HabitTrackerScreen(
     state: HabitTrackerUiState,
     onAddHabit: (String) -> Unit,
     onDeleteHabit: (Int) -> Unit,
+    onRenameHabit: (Int, String) -> Unit,
     onToggleHabit: (Int, LocalDate) -> Unit,
     onTogglePastHabit: (Int, LocalDate) -> Unit,
     onPreviousMonth: () -> Unit,
@@ -360,6 +373,7 @@ private fun HabitTrackerScreen(
                 habitRows = state.habitRows,
                 activeTrackingDate = activeTrackingDate,
                 onDeleteHabit = onDeleteHabit,
+                onRenameHabit = onRenameHabit,
                 onToggleHabit = onToggleHabit,
                 onTogglePastHabit = onTogglePastHabit
             )
@@ -512,6 +526,7 @@ private fun MonthTrackerCard(
     habitRows: List<HabitRowUi>,
     activeTrackingDate: LocalDate,
     onDeleteHabit: (Int) -> Unit,
+    onRenameHabit: (Int, String) -> Unit,
     onToggleHabit: (Int, LocalDate) -> Unit,
     onTogglePastHabit: (Int, LocalDate) -> Unit
 ) {
@@ -608,7 +623,8 @@ private fun MonthTrackerCard(
                             HabitNameCell(
                                 name = habit.name,
                                 rowHeight = rowHeight,
-                                onDelete = { onDeleteHabit(habit.id) }
+                                onDelete = { onDeleteHabit(habit.id) },
+                                onRename = { newName -> onRenameHabit(habit.id, newName) }
                             )
                         }
                     }
@@ -665,9 +681,17 @@ private fun MonthTrackerCard(
 }
 
 @Composable
-private fun HabitNameCell(name: String, rowHeight: Dp, onDelete: () -> Unit) {
+private fun HabitNameCell(
+    name: String,
+    rowHeight: Dp,
+    onDelete: () -> Unit,
+    onRename: (String) -> Unit
+) {
     var showConfirmDialog by remember { mutableStateOf(false) }
+    var showRenameDialog by remember { mutableStateOf(false) }
+    var editedName by remember(name) { mutableStateOf(name) }
 
+    // Delete confirmation dialog
     if (showConfirmDialog) {
         androidx.compose.material3.AlertDialog(
             onDismissRequest = { showConfirmDialog = false },
@@ -691,6 +715,46 @@ private fun HabitNameCell(name: String, rowHeight: Dp, onDelete: () -> Unit) {
         )
     }
 
+    // Rename dialog
+    if (showRenameDialog) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = {
+                showRenameDialog = false
+                editedName = name
+            },
+            title = { Text("Edit Habit Name") },
+            text = {
+                OutlinedTextField(
+                    value = editedName,
+                    onValueChange = { editedName = it },
+                    singleLine = true,
+                    label = { Text("Habit name") }
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        if (editedName.isNotBlank()) {
+                            onRename(editedName)
+                        }
+                        showRenameDialog = false
+                    },
+                    enabled = editedName.isNotBlank()
+                ) {
+                    Text("Save", color = MaterialTheme.colorScheme.primary)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    showRenameDialog = false
+                    editedName = name
+                }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
     Column(
         modifier = Modifier
             .width(132.dp)
@@ -703,12 +767,19 @@ private fun HabitNameCell(name: String, rowHeight: Dp, onDelete: () -> Unit) {
             fontWeight = FontWeight.Medium,
             maxLines = 2
         )
-        Spacer(modifier = Modifier.height(6.dp))
-        TextButton(
-            onClick = { showConfirmDialog = true },
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)
-        ) {
-            Text("Remove")
+        Row(horizontalArrangement = Arrangement.spacedBy(0.dp)) {
+            TextButton(
+                onClick = { showRenameDialog = true },
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)
+            ) {
+                Text("Edit", color = MaterialTheme.colorScheme.primary)
+            }
+            TextButton(
+                onClick = { showConfirmDialog = true },
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)
+            ) {
+                Text("Remove", color = MissedColor)
+            }
         }
     }
 }
