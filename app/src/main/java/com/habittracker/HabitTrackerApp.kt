@@ -874,6 +874,24 @@ private fun ProgressGraphCard(
     activeTrackingDate: LocalDate,
     habitCount: Int
 ) {
+    // Compute streak: consecutive days (going backwards from activeTrackingDate) with >= 70% done
+    val streak = remember(dailyTotals, activeTrackingDate, habitCount) {
+        if (habitCount == 0) return@remember 0
+        val threshold = (habitCount * 0.7f).toInt().coerceAtLeast(1)
+        var count = 0
+        var checkDay = activeTrackingDate
+        while (true) {
+            val done = dailyTotals[checkDay] ?: 0
+            if (done >= threshold) {
+                count++
+                checkDay = checkDay.minusDays(1)
+            } else {
+                break
+            }
+        }
+        count
+    }
+
     Card(
         shape = RoundedCornerShape(24.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
@@ -882,19 +900,53 @@ private fun ProgressGraphCard(
             modifier = Modifier.padding(18.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            Text(
-                text = "Progress graph",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Progress graph",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+                if (streak > 0) {
+                    Surface(
+                        color = Color(0xFFFF6B35).copy(alpha = 0.15f),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text(text = "\uD83D\uDD25", fontSize = 16.sp)
+                            Text(
+                                text = "$streak day streak!",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFBF4C00)
+                            )
+                        }
+                    }
+                }
+            }
             Text(
                 text = "Tracks your daily progress as a continuous slope. Each point shows your completed habit count.",
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f)
             )
-            MetricBadge(
-                title = "Open day",
-                value = "${activeTrackingDate.format(DateTimeFormatter.ofPattern("dd MMM"))}  $todayDoneCount / $habitCount"
-            )
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                MetricBadge(
+                    title = "Open day",
+                    value = "${activeTrackingDate.format(DateTimeFormatter.ofPattern("dd MMM"))}  $todayDoneCount / $habitCount"
+                )
+                if (streak >= 3) {
+                    MetricBadge(
+                        title = "Best streak",
+                        value = "\uD83D\uDD25 $streak days"
+                    )
+                }
+            }
             DailyProgressGraph(
                 days = days,
                 dailyTotals = dailyTotals,
@@ -923,6 +975,11 @@ private fun DailyProgressGraph(
         return
     }
 
+    // If there's only one real data point (day 1 of month), prepend a virtual Day 0 anchor at value=0
+    // so the graph draws a slope line instead of a lone dot.
+    val hasVirtualOrigin = plottedDays.size == 1
+    val virtualOriginDay: LocalDate? = if (hasVirtualOrigin) plottedDays[0].minusDays(1) else null
+
     val graphScrollState = rememberScrollState()
     val density = LocalDensity.current
     val pointSpacing = 60.dp
@@ -932,7 +989,10 @@ private fun DailyProgressGraph(
     val paddingTop = with(density) { 32.dp.toPx() }
     val paddingBottom = with(density) { 48.dp.toPx() }
 
-    val totalGraphWidth = paddingLeft + paddingRight + (plottedDays.size - 1).coerceAtLeast(0) * pointSpacingPx
+    // For width: if virtual origin is added, count it as an extra spacing slot
+    val realPointCount = plottedDays.size
+    val totalSlots = if (hasVirtualOrigin) realPointCount else (realPointCount - 1).coerceAtLeast(0)
+    val totalGraphWidth = paddingLeft + paddingRight + totalSlots * pointSpacingPx
     val totalGraphWidthDp = with(density) { totalGraphWidth.toDp() }.coerceAtLeast(200.dp)
 
     val maxValue = habitCount.coerceAtLeast(1)
@@ -943,12 +1003,15 @@ private fun DailyProgressGraph(
     val todayColor = MaterialTheme.colorScheme.primary
     val gridLineColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f)
 
-    // Auto-scroll to active tracking date
-    LaunchedEffect(activeTrackingDate, plottedDays) {
+    // Auto-scroll to active tracking date (offset by 1 if virtual origin exists)
+    LaunchedEffect(activeTrackingDate, plottedDays, hasVirtualOrigin) {
         val dayIndex = plottedDays.indexOfFirst { it == activeTrackingDate }
-        if (dayIndex > 0) {
-            val targetScroll = (dayIndex * pointSpacingPx - pointSpacingPx * 3).toInt().coerceAtLeast(0)
-            graphScrollState.scrollTo(targetScroll)
+        if (dayIndex >= 0) {
+            val adjustedIndex = if (hasVirtualOrigin) dayIndex + 1 else dayIndex
+            if (adjustedIndex > 0) {
+                val targetScroll = (adjustedIndex * pointSpacingPx - pointSpacingPx * 3).toInt().coerceAtLeast(0)
+                graphScrollState.scrollTo(targetScroll)
+            }
         }
     }
 
@@ -997,49 +1060,14 @@ private fun DailyProgressGraph(
                     )
                 }
 
-                if (plottedDays.size == 1) {
-                    // Single data point — draw a dot and label
-                    val value = dailyTotals[plottedDays[0]] ?: 0
-                    val x = paddingLeft
-                    val fraction = value.toFloat() / maxValue
-                    val y = drawAreaBottom - (fraction * drawAreaHeight)
-                    val isToday = plottedDays[0] == activeTrackingDate
-
-                    drawCircle(
-                        color = if (isToday) todayColor else secondaryColor,
-                        radius = 10f,
-                        center = Offset(x, y)
-                    )
-
-                    // Draw count label
-                    drawContext.canvas.nativeCanvas.apply {
-                        val paint = android.graphics.Paint().apply {
-                            textAlign = android.graphics.Paint.Align.CENTER
-                            textSize = 32f
-                            isFakeBoldText = true
-                            color = if (isToday) todayColor.hashCode()
-                                    else android.graphics.Color.parseColor("#1E1B18")
-                        }
-                        drawText("$value", x, y - 20f, paint)
-                    }
-
-                    // Draw day label
-                    drawContext.canvas.nativeCanvas.apply {
-                        val paint = android.graphics.Paint().apply {
-                            textAlign = android.graphics.Paint.Align.CENTER
-                            textSize = 28f
-                            isFakeBoldText = isToday
-                            color = if (isToday) todayColor.hashCode()
-                                    else android.graphics.Color.parseColor("#6B6560")
-                        }
-                        drawText(plottedDays[0].dayOfMonth.toString(), x, drawAreaBottom + 36f, paint)
-                    }
-                    return@Canvas
+                // Calculate data points — prepend virtual Day 0 anchor if needed
+                val allPointDays: List<LocalDate?> = if (hasVirtualOrigin) {
+                    listOf(null) + plottedDays   // null = virtual origin
+                } else {
+                    plottedDays.map { it as LocalDate? }
                 }
-
-                // Calculate data points
-                val points = plottedDays.mapIndexed { index, day ->
-                    val value = dailyTotals[day] ?: 0
+                val points = allPointDays.mapIndexed { index, day ->
+                    val value = if (day == null) 0 else (dailyTotals[day] ?: 0)
                     val x = paddingLeft + index * pointSpacingPx
                     val fraction = value.toFloat() / maxValue
                     val y = drawAreaBottom - (fraction * drawAreaHeight)
@@ -1096,9 +1124,14 @@ private fun DailyProgressGraph(
                 )
 
                 // Draw data points, count labels, and day labels
+                // If virtual origin exists, index 0 is the fake anchor — skip dot/label for it
                 points.forEachIndexed { index, (x, y, value) ->
-                    val day = plottedDays[index]
+                    val isVirtualPoint = hasVirtualOrigin && index == 0
+                    val day: LocalDate? = if (isVirtualPoint) null else plottedDays[if (hasVirtualOrigin) index - 1 else index]
                     val isToday = day == activeTrackingDate
+
+                    // Skip decorations for the virtual origin anchor
+                    if (isVirtualPoint) return@forEachIndexed
 
                     // Outer glow circle for today
                     if (isToday) {
@@ -1160,7 +1193,7 @@ private fun DailyProgressGraph(
                                     else android.graphics.Color.parseColor("#6B6560")
                             isAntiAlias = true
                         }
-                        drawText(day.dayOfMonth.toString(), x, drawAreaBottom + 30f, paint)
+                        drawText(day!!.dayOfMonth.toString(), x, drawAreaBottom + 30f, paint)
                     }
 
                     // Day-of-week abbreviation below day number
@@ -1171,7 +1204,7 @@ private fun DailyProgressGraph(
                             color = android.graphics.Color.parseColor("#9E9890")
                             isAntiAlias = true
                         }
-                        drawText(day.dayOfWeek.name.take(3), x, drawAreaBottom + 48f, paint)
+                        drawText(day!!.dayOfWeek.name.take(3), x, drawAreaBottom + 48f, paint)
                     }
                 }
             }
