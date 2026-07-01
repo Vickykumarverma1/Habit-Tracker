@@ -126,6 +126,10 @@ interface HabitTrackerDao {
     @Query("SELECT * FROM habit_completions WHERE date LIKE :monthPrefix || '%'")
     fun observeCompletionsForMonth(monthPrefix: String): kotlinx.coroutines.flow.Flow<List<HabitCompletionEntity>>
 
+    /** All completions ever recorded — used for cross-month streak calculation. */
+    @Query("SELECT * FROM habit_completions")
+    fun observeAllCompletions(): kotlinx.coroutines.flow.Flow<List<HabitCompletionEntity>>
+
     @Insert
     suspend fun insertHabit(habit: HabitEntity)
 
@@ -185,7 +189,8 @@ data class HabitTrackerUiState(
     val selectedMonth: YearMonth = YearMonth.now(),
     val habitRows: List<HabitRowUi> = emptyList(),
     val dailyTotals: Map<LocalDate, Int> = emptyMap(),
-
+    /** Completion counts across ALL months — used for cross-month streak calculation. */
+    val allDailyTotals: Map<LocalDate, Int> = emptyMap(),
 )
 
 class HabitTrackerViewModel(application: Application) : AndroidViewModel(application) {
@@ -197,13 +202,20 @@ class HabitTrackerViewModel(application: Application) : AndroidViewModel(applica
         dao.observeHabits(),
         selectedMonth.flatMapLatest { month ->
             dao.observeCompletionsForMonth(month.toString())
-        }
-    ) { month, habits, completions ->
+        },
+        dao.observeAllCompletions()
+    ) { month, habits, completions, allCompletions ->
         val completionsByHabit = completions
             .groupBy { it.habitId }
             .mapValues { (_, items) -> items.map { LocalDate.parse(it.date) }.toSet() }
 
         val dailyTotals = completions
+            .map { LocalDate.parse(it.date) }
+            .groupingBy { it }
+            .eachCount()
+
+        // All-time daily totals for cross-month streak calculation
+        val allDailyTotals = allCompletions
             .map { LocalDate.parse(it.date) }
             .groupingBy { it }
             .eachCount()
@@ -217,7 +229,8 @@ class HabitTrackerViewModel(application: Application) : AndroidViewModel(applica
                     completedDates = completionsByHabit[habit.id].orEmpty()
                 )
             },
-            dailyTotals = dailyTotals
+            dailyTotals = dailyTotals,
+            allDailyTotals = allDailyTotals
         )
     }.stateIn(
         scope = viewModelScope,
@@ -381,6 +394,7 @@ private fun HabitTrackerScreen(
             ProgressGraphCard(
                 days = days,
                 dailyTotals = state.dailyTotals,
+                allDailyTotals = state.allDailyTotals,
                 todayDoneCount = todayDoneCount,
                 activeTrackingDate = activeTrackingDate,
                 habitCount = state.habitRows.size
@@ -870,18 +884,20 @@ private fun TrackerDayCell(
 private fun ProgressGraphCard(
     days: List<LocalDate>,
     dailyTotals: Map<LocalDate, Int>,
+    allDailyTotals: Map<LocalDate, Int>,
     todayDoneCount: Int,
     activeTrackingDate: LocalDate,
     habitCount: Int
 ) {
-    // Compute streak: consecutive days (going backwards from activeTrackingDate) with >= 70% done
-    val streak = remember(dailyTotals, activeTrackingDate, habitCount) {
+    // Compute streak: consecutive days (going backwards from activeTrackingDate) with >= 70% done.
+    // Uses allDailyTotals so the streak carries across month boundaries (like LeetCode / GitHub).
+    val streak = remember(allDailyTotals, activeTrackingDate, habitCount) {
         if (habitCount == 0) return@remember 0
         val threshold = (habitCount * 0.7f).toInt().coerceAtLeast(1)
         var count = 0
         var checkDay = activeTrackingDate
         while (true) {
-            val done = dailyTotals[checkDay] ?: 0
+            val done = allDailyTotals[checkDay] ?: 0
             if (done >= threshold) {
                 count++
                 checkDay = checkDay.minusDays(1)
