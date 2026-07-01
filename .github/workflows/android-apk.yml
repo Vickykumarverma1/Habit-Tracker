@@ -23,7 +23,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Set up Java 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v4.7.1
         with:
           distribution: temurin
           java-version: "17"
@@ -52,14 +52,14 @@ jobs:
 
       - name: Upload signed release APK
         if: env.HAS_RELEASE_SIGNING == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: habit-tracker-release-apk
           path: app/build/outputs/apk/release/*.apk
 
       - name: Upload debug APK
         if: env.HAS_RELEASE_SIGNING != 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: habit-tracker-debug-apk
           path: app/build/outputs/apk/debug/*.apk
